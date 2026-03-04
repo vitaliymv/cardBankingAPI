@@ -1,88 +1,167 @@
 const express = require('express');
-const mongoose = require('mongoose');
-const dotenv = require('dotenv');
-const Card = require('./models/card');
-
-dotenv.config();
+const sqlite3 = require('sqlite3').verbose();
+const path = require('path');
 
 const app = express();
 app.use(express.json());
 
-mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
-  .then(() => console.log('Connected to MongoDB'))
-  .catch((err) => console.error('MongoDB connection error:', err));
+// Render використовує process.env.PORT
+const PORT = process.env.PORT || 3000;
 
+// 📌 Підключення SQLite
+const dbPath = path.join(__dirname, 'database.sqlite');
 
+const db = new sqlite3.Database(dbPath, (err) => {
+  if (err) {
+    console.error('Database connection error:', err.message);
+  } else {
+    console.log('Connected to SQLite database');
+
+    // Створення таблиці якщо не існує
+    db.run(`
+      CREATE TABLE IF NOT EXISTS cards (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ownerKey TEXT NOT NULL,
+        cardNumber TEXT UNIQUE NOT NULL,
+        cvv TEXT NOT NULL,
+        expireDate TEXT NOT NULL,
+        balance REAL DEFAULT 0
+      )
+    `);
+  }
+});
+
+// 🔹 Генерація даних
 function generateCardNumber() {
   return '4' + Math.random().toString().slice(2, 15).padEnd(15, '0');
 }
 
 function generateCVV() {
-  return Math.floor(100 + Math.random() * 900).toString(); // Генерує число від 100 до 999
+  return Math.floor(100 + Math.random() * 900).toString();
 }
 
 function generateExpireDate() {
   const today = new Date();
-  const expireYear = today.getFullYear() + 3; // Додаємо 3 роки
-  const expireMonth = (today.getMonth() + 1).toString().padStart(2, '0'); // Місяці від 1 до 12
-  return `${expireMonth}/${expireYear.toString().slice(2)}`; // Формат MM/YY
+  const expireYear = today.getFullYear() + 3;
+  const expireMonth = (today.getMonth() + 1).toString().padStart(2, '0');
+  return `${expireMonth}/${expireYear.toString().slice(2)}`;
 }
 
-app.post('/cards', async (req, res) => {
+// =========================
+// POST /cards
+// =========================
+app.post('/cards', (req, res) => {
   const { ownerKey } = req.body;
+
+  if (!ownerKey) {
+    return res.status(400).json({ error: 'ownerKey is required' });
+  }
+
   const cardNumber = generateCardNumber();
   const cvv = generateCVV();
   const expireDate = generateExpireDate();
 
-  try {
-    const newCard = new Card({ ownerKey, cardNumber, cvv, expireDate, balance: 0 });
-    await newCard.save();
-    res.status(201).json(newCard);
-  } catch (err) {
-    res.status(400).json({ error: 'Error creating card', details: err.message });
-  }
+  const sql = `
+    INSERT INTO cards (ownerKey, cardNumber, cvv, expireDate, balance)
+    VALUES (?, ?, ?, ?, 0)
+  `;
+
+  db.run(sql, [ownerKey, cardNumber, cvv, expireDate], function (err) {
+    if (err) {
+      return res.status(400).json({ error: err.message });
+    }
+
+    res.status(201).json({
+      id: this.lastID,
+      ownerKey,
+      cardNumber,
+      cvv,
+      expireDate,
+      balance: 0
+    });
+  });
 });
 
-app.get('/cards/:ownerKey', async (req, res) => {
+// =========================
+// GET /cards/:ownerKey
+// =========================
+app.get('/cards/:ownerKey', (req, res) => {
   const { ownerKey } = req.params;
-  try {
-    const cards = await Card.find({ ownerKey });
-    res.status(200).json(cards);
-  } catch (err) {
-    res.status(400).json({ error: 'Error fetching cards', details: err.message });
-  }
+
+  db.all(`SELECT * FROM cards WHERE ownerKey = ?`, [ownerKey], (err, rows) => {
+    if (err) {
+      return res.status(400).json({ error: err.message });
+    }
+
+    res.status(200).json(rows);
+  });
 });
 
-app.put('/cards/:cardNumber/balance', async (req, res) => {
+// =========================
+// PUT /cards/:cardNumber/balance
+// =========================
+app.put('/cards/:cardNumber/balance', (req, res) => {
   const { cardNumber } = req.params;
   const { amount } = req.body;
-  try {
-    const card = await Card.findOne({ cardNumber });
-    if (!card) {
+
+  if (amount === undefined) {
+    return res.status(400).json({ error: 'amount is required' });
+  }
+
+  const updateSql = `
+    UPDATE cards
+    SET balance = balance + ?
+    WHERE cardNumber = ?
+  `;
+
+  db.run(updateSql, [amount, cardNumber], function (err) {
+    if (err) {
+      return res.status(400).json({ error: err.message });
+    }
+
+    if (this.changes === 0) {
       return res.status(404).json({ error: 'Card not found' });
     }
-    card.balance += amount;
-    await card.save();
-    res.status(200).json(card);
-  } catch (err) {
-    res.status(400).json({ error: 'Error updating balance', details: err.message });
-  }
+
+    db.get(`SELECT * FROM cards WHERE cardNumber = ?`, [cardNumber], (err, row) => {
+      if (err) {
+        return res.status(400).json({ error: err.message });
+      }
+
+      res.status(200).json(row);
+    });
+  });
 });
 
-app.delete('/cards/:cardNumber', async (req, res) => {
+// =========================
+// DELETE /cards/:cardNumber
+// =========================
+app.delete('/cards/:cardNumber', (req, res) => {
   const { cardNumber } = req.params;
-  try {
-    const deletedCard = await Card.findOneAndDelete({ cardNumber });
-    if (!deletedCard) {
+
+  db.run(`DELETE FROM cards WHERE cardNumber = ?`, [cardNumber], function (err) {
+    if (err) {
+      return res.status(400).json({ error: err.message });
+    }
+
+    if (this.changes === 0) {
       return res.status(404).json({ error: 'Card not found' });
     }
+
     res.status(200).json({ message: 'Card deleted successfully' });
-  } catch (err) {
-    res.status(400).json({ error: 'Error deleting card', details: err.message });
-  }
+  });
 });
 
-const PORT = process.env.PORT || 3000;
+// =========================
+// Health check (для Render)
+// =========================
+app.get('/', (req, res) => {
+  res.send('Card API is running 🚀');
+});
+
+// =========================
+// Start server
+// =========================
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
